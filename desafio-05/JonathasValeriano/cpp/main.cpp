@@ -7,27 +7,31 @@
  * Todos os créditos dos algoritmos e estruturas de dados para o dev original desta solução.
 */
 
-#include <iostream>
-#include <string>
-#include <unordered_map>
-#include <vector>
-#include <iomanip>
-#include <thread>
+//#include <iostream>
+//#include <string>
+//#include <unordered_map>
+//#include <vector>
+//#include <iomanip>
+//#include <thread>
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cmath>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
-#include <fstream>
+//#include <fstream>
 
-#include <chrono>
+//#include <chrono>
 #include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <atomic>
+//#include <sys/mman.h>
+//#include <unistd.h>
+//#include <atomic>
 
-#include "third_part/hopscotch-map/tsl/hopscotch_map.h"
+//#include "third_part/hopscotch-map/tsl/hopscotch_map.h"
+
+#include <windows.h>
+#include <intrin.h>
+//#include <sstream>
 
 //Hashed string
 struct HString{
@@ -139,6 +143,7 @@ inline char *get_string(char *c, HString& hs, bool recycle = false){
   return ++c;
 }
 
+
 inline char *get_string_hashed(char *c, HString& hs){
   while(*c != ':') ++c;
   c += 2;
@@ -150,6 +155,7 @@ inline char *get_string_hashed(char *c, HString& hs){
   hs = {h, static_cast<size_t>(c - start), start};
   return ++c;
 }
+
 
 inline char *get_number(char *c, int& num){
   while(*c != ':') ++c;
@@ -163,13 +169,13 @@ inline char *get_number(char *c, int& num){
 
 void parse_json_chunk(ThreadData *data){
 
-  ::madvise(data->buffer, data->buffer_len, MADV_SEQUENTIAL);
+  //::madvise(data->buffer, data->buffer_len, MADV_SEQUENTIAL);
 
   char *c = data->buffer;
   char *c_end = data->buffer + data->buffer_len;
 
   int salary, id_offset = 0;
-  HString name_str, surname_str, area_str;
+  HString name_str={0,0,nullptr}, surname_str={0,0,nullptr}, area_str={0,0,nullptr};
   Area *area;
   Surname *surname;
   for(;;){
@@ -274,11 +280,10 @@ public:
 
 size_t page_size()
 {
-    static const size_t page_size = []
-    {
-        return sysconf(_SC_PAGE_SIZE);
-    }();
-    return page_size;
+    SYSTEM_INFO si;
+    ZeroMemory(&si, sizeof(si));
+    GetSystemInfo(&si);
+    return si.dwPageSize;;
 }
 
 size_t make_offset_page_aligned(size_t offset) noexcept
@@ -287,50 +292,79 @@ size_t make_offset_page_aligned(size_t offset) noexcept
     return offset / page_size_ * page_size_;
 }
 
+//Returns the last Win32 error, in string format. Returns an empty string if there is no error.
+std::string GetLastErrorAsString()
+{
+    //Get the error message, if any.
+    DWORD errorMessageID = ::GetLastError();
+    if(errorMessageID == 0)
+        return std::string(); //No error message has been recorded
+
+    LPSTR messageBuffer = nullptr;
+    size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                 NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+
+    std::string message(messageBuffer, size);
+
+    //Free the buffer.
+    LocalFree(messageBuffer);
+
+    return message;
+}
+
+
 int main(int argc, char *argv[]) {
 
-//    ScopedTimer timer{"\nTotal elapsed time"};
+    ScopedTimer timer{"\nTotal elapsed time"};
 
     if(argc != 2 && argc != 3){
       std::cout << "Usage: d5 [num_threads] <file>";
       return 1;
     }
 
-    int file;
+    HANDLE file;
     int num_threads;
 
     if(argc == 3){
       num_threads = atoi(argv[1]);
-      file = open64( argv[2], O_RDWR | O_NOATIME, 0644 );
+      file = CreateFileA(argv[2], GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     }else{
       num_threads = std::thread::hardware_concurrency();
-      file = open64( argv[1], O_RDWR | O_NOATIME, 0644 );
+      file = CreateFileA(argv[1], GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     }
 
-    if(file < 0)
+    if(file == INVALID_HANDLE_VALUE)
     {
-        std::cout << "ERROR: invalid file path.";
+        std::cout << "ERROR: invalid file path. " << GetLastError();
         return 1;
     }
 
-    //get file size
-    const size_t file_size = lseek64(file, 0, SEEK_END);
-    lseek64(file, 0, SEEK_SET);
+    LARGE_INTEGER li_file_size;
+    GetFileSizeEx(file, &li_file_size);
+    const size_t file_size = li_file_size.QuadPart;
 
     size_t offset{0};
     const int64_t aligned_offset = make_offset_page_aligned(offset);
     const int64_t length_to_map = offset - aligned_offset + file_size;
 
-    char* mapping_start = static_cast<char*>(
-        ::mmap64(
-            0,
-            length_to_map,
-            PROT_READ,
-            MAP_SHARED,
-            file,
-            aligned_offset
-        )
-    );
+    HANDLE file_mapping = CreateFileMapping(file, NULL, PAGE_READONLY, li_file_size.HighPart, li_file_size.LowPart, NULL);
+    if (file_mapping == NULL) {
+        std::cout << "Falha ao criar mapeamento: " << GetLastErrorAsString();
+        return 1;
+    }
+
+    char* mapping_start = static_cast<char*>(MapViewOfFile(file_mapping,
+                                                             FILE_MAP_READ,
+                                                             0,
+                                                             0,
+                                                             length_to_map));
+
+
+    if (!mapping_start) {
+
+        std::cout << "Falha ao mapear: " << GetLastErrorAsString();
+        return 2;
+    }
 
     std::vector<ThreadData> data(num_threads);
     std::vector<std::thread> threads( num_threads - 1 );
@@ -340,6 +374,7 @@ int main(int argc, char *argv[]) {
     size_t buffer_size = std::ceil(file_size / num_threads);
     size_t current_pos{0};
     size_t read_size{0};
+
 
     bool last_chunk{false};
     for(int i = 0; i < num_threads; ++i){
@@ -371,6 +406,7 @@ int main(int argc, char *argv[]) {
     for(auto& thread : threads){
         if(thread.joinable()){ thread.join(); }
     }
+
 
     ThreadData &d = data[0];
 
@@ -404,20 +440,24 @@ int main(int argc, char *argv[]) {
       }
     }
 
+
     std::ios_base::sync_with_stdio(false);
+    std::string output;
+    output.reserve(100000);
+    std::stringstream ss(output);
 
     //write results
 
     //global
     for(auto it = d.min_names.begin(); it != d.min_names.end(); it += 2){
-      std::cout << "global_min|" << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)d.min_salary * 0.01) << '\n';
+      ss << "global_min|" << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)d.min_salary * 0.01) << '\n';
     }
 
     for(auto it = d.max_names.begin(); it != d.max_names.end(); it += 2){
-      std::cout << "global_max|" << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)d.max_salary * 0.01) << '\n';
+      ss << "global_max|" << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)d.max_salary * 0.01) << '\n';
     }
 
-    std::cout << "global_avg|" << std::fixed << std::setprecision(2) << (double)((double)d.total_salary * 0.01) / (double)d.total_employees << '\n';
+    ss << "global_avg|" << std::fixed << std::setprecision(2) << (double)((double)d.total_salary * 0.01) / (double)d.total_employees << '\n';
 
     //areas
     const Area* least_employees = nullptr;
@@ -426,14 +466,14 @@ int main(int argc, char *argv[]) {
     for(auto& pair : d.areas){
       const Area& area = pair.second;
       if(area.total_employees > 0){
-        std::cout << "area_avg|" << area.name << '|' << std::fixed << std::setprecision(2) << (double)((double)area.total_salary * 0.01 / area.total_employees) << '\n';
+        ss << "area_avg|" << area.name << '|' << std::fixed << std::setprecision(2) << (double)((double)area.total_salary * 0.01 / area.total_employees) << '\n';
 
         for(auto it = area.min_names.begin(); it != area.min_names.end(); it += 2){
-          std::cout << "area_min|" << area.name << '|' << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)area.min_salary * 0.01) << '\n';
+          ss << "area_min|" << area.name << '|' << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)area.min_salary * 0.01) << '\n';
         }
 
         for(auto it = area.max_names.begin(); it != area.max_names.end(); it += 2){
-          std::cout << "area_max|" << area.name << '|' << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)area.max_salary * 0.01) << '\n';
+          ss << "area_max|" << area.name << '|' << *it << ' ' << *(it + 1) << '|' << std::fixed << std::setprecision(2) << (double)((double)area.max_salary * 0.01) << '\n';
         }
 
         if(most_employees == nullptr || area.total_employees > most_employees->total_employees){
@@ -446,8 +486,8 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    std::cout << "least_employees|" << least_employees->name << '|' << least_employees->total_employees << '\n';
-    std::cout << "most_employees|" << most_employees->name << '|' << most_employees->total_employees << '\n';
+    ss << "least_employees|" << least_employees->name << '|' << least_employees->total_employees << '\n';
+    ss << "most_employees|" << most_employees->name << '|' << most_employees->total_employees << '\n';
 
     //surnames
     for(auto& pair : d.surnames){
@@ -455,11 +495,16 @@ int main(int argc, char *argv[]) {
         const Surname& surname = pair.second;
         if(surname.total_employees > 1){
             for(auto& name : surname.max_names){
-              std::cout << "last_name_max|" << surname_str << '|' << name << ' ' << surname_str << '|' << std::fixed << std::setprecision(2) << (double)((double)surname.max_salary * 0.01) << '\n';
+              ss << "last_name_max|" << surname_str << '|' << name << ' ' << surname_str << '|' << std::fixed << std::setprecision(2) << (double)((double)surname.max_salary * 0.01) << '\n';
             }
         }
     }
 
-    ::munmap(const_cast<char*>(mapping_start), length_to_map);
-    close(file);
+    std::cout << ss.str();
+
+    UnmapViewOfFile(mapping_start);
+    //::munmap(const_cast<char*>(mapping_start), length_to_map);
+    CloseHandle(file_mapping);
+    CloseHandle(file);
+    //close(file);
 }
